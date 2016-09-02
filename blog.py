@@ -3,6 +3,7 @@ import os
 import sqlite3
 from flask import Flask, request, session, g, redirect, url_for, abort, \
 	render_template, flash
+from werkzeug.security import generate_password_hash, check_password_hash
 
 # create our little application :)
 app = Flask(__name__)
@@ -54,44 +55,89 @@ def initdb_command():
     init_db()
     print ('Initialized the database.')
 
-@app.route('/')
-def show_entries():
+def query_db(query, args=(), one=False):
+    """Queries the database and returns a list of dictionaries."""
     conn = get_db()
     cur = conn.cursor()
-    cur.execute('SELECT title, text FROM ENTRIES ORDER BY id DESC')
-    entries = cur.fetchall()
+    cur.execute(query, args)
+    rv = cur.fetchall()
     cur.close()
-    return render_template('show_entries.html', entries=entries)
+    return (rv[0] if rv else None) if one else rv
+
+def get_user_id(username):
+    """Convenience method to look up the id for a username."""
+    rv = query_db('SELECT user_id FROM users where username = ?', 
+                [username], one=True)
+    return rv[0] if rv else None
+
+def edit_db(query, args=()):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(query, args)
+    conn.commit()
+    cur.close()
+
+@app.route('/')
+def home():
+    return render_template('layout.html')
+
+@app.route('/<user>')
+def show_entries(user):
+    entries = query_db('SELECT title, text FROM entries where entries.author = ? ORDER BY id DESC ', [user])
+    return render_template('show_entries.html', entries=entries, user=user)
 
 @app.route('/add', methods=['POST'])
 def add_entry():
-    if not session.get('logged_in'):
+    if 'username' not in session:
         abort(401)
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute('INSERT INTO entries (title, text) VALUES (?, ?)', 
-                    [request.form['title'], request.form['text']])
-    conn.commit()
-    cur.close()
+    edit_db('INSERT INTO entries (author, title, text) VALUES (?, ?, ?)', 
+            [session['username'], request.form['title'], request.form['text']])
     flash('New entry was successfully posted')
-    return redirect(url_for('show_entries'))
+    return redirect(url_for('show_entries', user=session['username']))
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     error = None
     if request.method == 'POST':
-        if request.form['username'] != app.config['USERNAME']:
+        user = query_db('SELECT * FROM users where username = ?', 
+                        [request.form['username']], one=True)
+
+        if user is None:
             error = 'Invalid username'
-        elif request.form['password'] != app.config['PASSWORD']:
+        elif not check_password_hash(user['pw_hash'], request.form['password']):
             error = 'Invalid password'
         else:
-            session['logged_in'] = True
+            session['username'] = user['username']
             flash('You were logged in')
-            return redirect(url_for('show_entries'))
+            return redirect(url_for('show_entries', user=user['username']))
     return render_template('login.html', error=error)
 
 @app.route('/logout')
 def logout():
-    session.pop('logged_in', None)
+    session.pop('username', None)
     flash('You were logged out')
-    return redirect(url_for('show_entries'))
+    return redirect(url_for('home'))
+
+@app.route('/signup', methods=['GET', 'POST'])
+def signup():
+    error = None
+    if request.method == 'POST':
+        if not request.form['username']:
+            error = 'Please enter a username'
+        elif get_user_id(request.form['username']) is not None:
+            error = 'The username is already taken'
+        elif not request.form['email'] or '@' not in request.form['email']:
+            error = 'Please enter a valid email address'
+        elif not request.form['password']:
+            error = 'Please enter a password'
+        elif request.form['password'] != request.form['password2']:
+            error = 'Passwords do no match'
+        else:
+            edit_db('INSERT INTO users (username, email, pw_hash) VALUES (?, ?, ?)', 
+                    [request.form['username'], request.form['email'], \
+                    generate_password_hash(request.form['password'])])
+            flash('Your account was successfully registered')
+            return redirect(url_for('login'))
+    return render_template('signup.html', error=error)
+ 
+
